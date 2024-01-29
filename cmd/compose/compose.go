@@ -27,21 +27,22 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/compose-spec/compose-go/cli"
-	"github.com/compose-spec/compose-go/dotenv"
-	"github.com/compose-spec/compose-go/types"
-	composegoutils "github.com/compose-spec/compose-go/utils"
+	"github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/dotenv"
+	"github.com/compose-spec/compose-go/v2/types"
+	composegoutils "github.com/compose-spec/compose-go/v2/utils"
 	"github.com/docker/buildx/util/logutil"
-	buildx "github.com/docker/buildx/util/progress"
 	dockercli "github.com/docker/cli/cli"
 	"github.com/docker/cli/cli-plugins/manager"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/pkg/remote"
+	buildkit "github.com/moby/buildkit/util/progress/progressui"
 	"github.com/morikuni/aec"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/docker/cli/cli-plugins/plugin"
 	"github.com/docker/compose/v2/cmd/formatter"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/compose"
@@ -75,7 +76,7 @@ func AdaptCmd(fn CobraCommand) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		contextString := fmt.Sprintf("%s", ctx)
-		if !strings.HasSuffix(contextString, ".WithCancel") { // need to handle cancel
+		if !strings.Contains(contextString, ".WithCancel") || plugin.RunningStandalone() { // need to handle cancel
 			cancellableCtx, cancel := context.WithCancel(cmd.Context())
 			ctx = cancellableCtx
 			s := make(chan os.Signal, 1)
@@ -163,7 +164,7 @@ func (o *ProjectOptions) addProjectFlags(f *pflag.FlagSet) {
 	f.StringVar(&o.ProjectDir, "project-directory", "", "Specify an alternate working directory\n(default: the path of the, first specified, Compose file)")
 	f.StringVar(&o.WorkDir, "workdir", "", "DEPRECATED! USE --project-directory INSTEAD.\nSpecify an alternate working directory\n(default: the path of the, first specified, Compose file)")
 	f.BoolVar(&o.Compatibility, "compatibility", false, "Run compose in backward compatibility mode")
-	f.StringVar(&o.Progress, "progress", buildx.PrinterModeAuto, fmt.Sprintf(`Set type of progress output (%s)`, strings.Join(printerModes, ", ")))
+	f.StringVar(&o.Progress, "progress", string(buildkit.AutoMode), fmt.Sprintf(`Set type of progress output (%s)`, strings.Join(printerModes, ", ")))
 	_ = f.MarkHidden("workdir")
 }
 
@@ -230,10 +231,10 @@ func (o *ProjectOptions) ToProject(dockerCli command.Cli, services []string, po 
 		return nil, err
 	}
 
-	for i, s := range project.Services {
+	for name, s := range project.Services {
 		s.CustomLabels = map[string]string{
 			api.ProjectLabel:     project.Name,
-			api.ServiceLabel:     s.Name,
+			api.ServiceLabel:     name,
 			api.VersionLabel:     api.ComposeVersion,
 			api.WorkingDirLabel:  project.WorkingDir,
 			api.ConfigFilesLabel: strings.Join(project.ComposeFiles, ","),
@@ -242,7 +243,7 @@ func (o *ProjectOptions) ToProject(dockerCli command.Cli, services []string, po 
 		if len(o.EnvFiles) != 0 {
 			s.CustomLabels[api.EnvironmentFileLabel] = strings.Join(o.EnvFiles, ",")
 		}
-		project.Services[i] = s
+		project.Services[name] = s
 	}
 
 	project.WithoutUnnecessaryResources()
@@ -458,6 +459,7 @@ func RootCommand(dockerCli command.Cli, backend api.Service) *cobra.Command { //
 		copyCommand(&opts, dockerCli, backend),
 		waitCommand(&opts, dockerCli, backend),
 		scaleCommand(&opts, dockerCli, backend),
+		statsCommand(&opts, dockerCli),
 		watchCommand(&opts, dockerCli, backend),
 		alphaCommand(&opts, dockerCli, backend),
 	)
@@ -507,12 +509,8 @@ func setEnvWithDotEnv(prjOpts *ProjectOptions) error {
 	if err != nil {
 		return compose.WrapComposeError(err)
 	}
-	workingDir, err := options.GetWorkingDir()
-	if err != nil {
-		return err
-	}
 
-	envFromFile, err := dotenv.GetEnvFromFile(composegoutils.GetAsEqualsMap(os.Environ()), workingDir, options.EnvFiles)
+	envFromFile, err := dotenv.GetEnvFromFile(composegoutils.GetAsEqualsMap(os.Environ()), options.EnvFiles)
 	if err != nil {
 		return err
 	}

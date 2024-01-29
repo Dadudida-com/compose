@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/compose/v2/pkg/utils"
 )
 
@@ -135,6 +135,8 @@ type BuildOptions struct {
 	Quiet bool
 	// Services passed in the command line to be built
 	Services []string
+	// Deps also build selected services dependencies
+	Deps bool
 	// Ssh authentications passed in the command line
 	SSHs []types.SSHKey
 	// Memory limit for the build container
@@ -146,9 +148,9 @@ type BuildOptions struct {
 // Apply mutates project according to build options
 func (o BuildOptions) Apply(project *types.Project) error {
 	platform := project.Environment["DOCKER_DEFAULT_PLATFORM"]
-	for i, service := range project.Services {
+	for name, service := range project.Services {
 		if service.Image == "" && service.Build == nil {
-			return fmt.Errorf("invalid service %q. Must specify either image or build", service.Name)
+			return fmt.Errorf("invalid service %q. Must specify either image or build", name)
 		}
 
 		if service.Build == nil {
@@ -156,20 +158,20 @@ func (o BuildOptions) Apply(project *types.Project) error {
 		}
 		if platform != "" {
 			if len(service.Build.Platforms) > 0 && !utils.StringContains(service.Build.Platforms, platform) {
-				return fmt.Errorf("service %q build.platforms does not support value set by DOCKER_DEFAULT_PLATFORM: %s", service.Name, platform)
+				return fmt.Errorf("service %q build.platforms does not support value set by DOCKER_DEFAULT_PLATFORM: %s", name, platform)
 			}
 			service.Platform = platform
 		}
 		if service.Platform != "" {
 			if len(service.Build.Platforms) > 0 && !utils.StringContains(service.Build.Platforms, service.Platform) {
-				return fmt.Errorf("service %q build configuration does not support platform: %s", service.Name, service.Platform)
+				return fmt.Errorf("service %q build configuration does not support platform: %s", name, service.Platform)
 			}
 		}
 
 		service.Build.Pull = service.Build.Pull || o.Pull
 		service.Build.NoCache = service.Build.NoCache || o.NoCache
 
-		project.Services[i] = service
+		project.Services[name] = service
 	}
 	return nil
 }
@@ -361,9 +363,28 @@ type PortOptions struct {
 	Index    int
 }
 
+// OCIVersion controls manifest generation to ensure compatibility
+// with different registries.
+//
+// Currently, this is not exposed as an option to the user – Compose uses
+// OCI 1.0 mode automatically for ECR registries based on domain and OCI 1.1
+// for all other registries.
+//
+// There are likely other popular registries that do not support the OCI 1.1
+// format, so it might make sense to expose this as a CLI flag or see if
+// there's a way to generically probe the registry for support level.
+type OCIVersion string
+
+const (
+	OCIVersion1_0 OCIVersion = "1.0"
+	OCIVersion1_1 OCIVersion = "1.1"
+)
+
 // PublishOptions group options of the Publish API
 type PublishOptions struct {
 	ResolveImageDigests bool
+
+	OCIVersion OCIVersion
 }
 
 func (e Event) String() string {
@@ -488,6 +509,7 @@ type ServiceStatus struct {
 // LogOptions defines optional parameters for the `Log` API
 type LogOptions struct {
 	Project    *types.Project
+	Index      int
 	Services   []string
 	Tail       string
 	Since      string

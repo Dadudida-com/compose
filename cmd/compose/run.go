@@ -21,11 +21,12 @@ import (
 	"fmt"
 	"strings"
 
-	xprogress "github.com/docker/buildx/util/progress"
+	"github.com/compose-spec/compose-go/v2/format"
+	xprogress "github.com/moby/buildkit/util/progress/progressui"
+	"github.com/sirupsen/logrus"
 
-	cgo "github.com/compose-spec/compose-go/cli"
-	"github.com/compose-spec/compose-go/loader"
-	"github.com/compose-spec/compose-go/types"
+	cgo "github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/opts"
 	"github.com/mattn/go-shellwords"
@@ -83,6 +84,9 @@ func (options runOptions) apply(project *types.Project) error {
 
 	// --service-ports and --publish are incompatible
 	if !options.servicePorts {
+		if len(target.Ports) > 0 {
+			logrus.Debug("Running service without ports exposed as --service-ports=false")
+		}
 		target.Ports = []types.ServicePortConfig{}
 		for _, p := range options.publish {
 			config, err := types.ParsePortConfig(p)
@@ -94,16 +98,16 @@ func (options runOptions) apply(project *types.Project) error {
 	}
 
 	for _, v := range options.volumes {
-		volume, err := loader.ParseVolume(v)
+		volume, err := format.ParseVolume(v)
 		if err != nil {
 			return err
 		}
 		target.Volumes = append(target.Volumes, volume)
 	}
 
-	for i, s := range project.Services {
-		if s.Name == options.Service {
-			project.Services[i] = target
+	for name := range project.Services {
+		if name == options.Service {
+			project.Services[name] = target
 			break
 		}
 	}
@@ -157,7 +161,7 @@ func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *
 			}
 
 			if createOpts.quietPull {
-				buildOpts.Progress = xprogress.PrinterModeQuiet
+				buildOpts.Progress = string(xprogress.QuietMode)
 			}
 
 			options.ignoreOrphans = utils.StringToBool(project.Environment[ComposeIgnoreOrphans])
@@ -181,7 +185,7 @@ func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *
 	flags.StringArrayVarP(&options.volumes, "volume", "v", []string{}, "Bind mount a volume.")
 	flags.StringArrayVarP(&options.publish, "publish", "p", []string{}, "Publish a container's port(s) to the host.")
 	flags.BoolVar(&options.useAliases, "use-aliases", false, "Use the service's network useAliases in the network(s) the container connects to.")
-	flags.BoolVar(&options.servicePorts, "service-ports", false, "Run command with the service's ports enabled and mapped to the host.")
+	flags.BoolVarP(&options.servicePorts, "service-ports", "P", false, "Run command with all service's ports enabled and mapped to the host.")
 	flags.BoolVar(&options.quietPull, "quiet-pull", false, "Pull without printing progress information.")
 	flags.BoolVar(&createOpts.Build, "build", false, "Build image before starting container.")
 	flags.BoolVar(&createOpts.removeOrphans, "remove-orphans", false, "Remove containers for services not defined in the Compose file.")
@@ -275,10 +279,10 @@ func runRun(ctx context.Context, backend api.Service, project *types.Project, op
 		QuietPull:         options.quietPull,
 	}
 
-	for i, service := range project.Services {
-		if service.Name == options.Service {
+	for name, service := range project.Services {
+		if name == options.Service {
 			service.StdinOpen = options.interactive
-			project.Services[i] = service
+			project.Services[name] = service
 		}
 	}
 
@@ -296,16 +300,16 @@ func runRun(ctx context.Context, backend api.Service, project *types.Project, op
 func startDependencies(ctx context.Context, backend api.Service, project types.Project, buildOpts *api.BuildOptions, requestedServiceName string, ignoreOrphans bool) error {
 	dependencies := types.Services{}
 	var requestedService types.ServiceConfig
-	for _, service := range project.Services {
-		if service.Name != requestedServiceName {
-			dependencies = append(dependencies, service)
+	for name, service := range project.Services {
+		if name != requestedServiceName {
+			dependencies[name] = service
 		} else {
 			requestedService = service
 		}
 	}
 
 	project.Services = dependencies
-	project.DisabledServices = append(project.DisabledServices, requestedService)
+	project.DisabledServices[requestedServiceName] = requestedService
 	err := backend.Create(ctx, &project, api.CreateOptions{
 		Build:         buildOpts,
 		IgnoreOrphans: ignoreOrphans,

@@ -29,7 +29,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/containerd/containerd/platforms"
 	"github.com/docker/compose/v2/internal/tracing"
 	moby "github.com/docker/docker/api/types"
@@ -141,7 +141,7 @@ func (c *convergence) ensureService(ctx context.Context, project *types.Project,
 				if err != nil {
 					return err
 				}
-				return c.service.apiClient().ContainerRemove(ctx, container.ID, moby.ContainerRemoveOptions{})
+				return c.service.apiClient().ContainerRemove(ctx, container.ID, containerType.RemoveOptions{})
 			}))
 			continue
 		}
@@ -203,6 +203,16 @@ func (c *convergence) ensureService(ctx context.Context, project *types.Project,
 	err = eg.Wait()
 	c.setObservedState(service.Name, updated)
 	return err
+}
+
+func getScale(config types.ServiceConfig) (int, error) {
+	scale := config.GetScale()
+	if scale > 1 && config.ContainerName != "" {
+		return 0, fmt.Errorf(doubledContainerNameWarning,
+			config.Name,
+			config.ContainerName)
+	}
+	return scale, nil
 }
 
 // resolveServiceReferences replaces reference to another service with reference to an actual container
@@ -287,11 +297,15 @@ func mustRecreate(expected types.ServiceConfig, actual moby.Container, policy st
 }
 
 func getContainerName(projectName string, service types.ServiceConfig, number int) string {
-	name := strings.Join([]string{projectName, service.Name, strconv.Itoa(number)}, api.Separator)
+	name := getDefaultContainerName(projectName, service.Name, strconv.Itoa(number))
 	if service.ContainerName != "" {
 		name = service.ContainerName
 	}
 	return name
+}
+
+func getDefaultContainerName(projectName, serviceName, index string) string {
+	return strings.Join([]string{projectName, serviceName, index}, api.Separator)
 }
 
 func getContainerProgressName(container moby.Container) string {
@@ -424,7 +438,7 @@ func shouldWaitForDependency(serviceName string, dependencyConfig types.ServiceD
 			}
 		}
 		return false, err
-	} else if service.Scale == 0 {
+	} else if service.GetScale() == 0 {
 		// don't wait for the dependency which configured to have 0 containers running
 		return false, nil
 	}
@@ -449,19 +463,6 @@ func nextContainerNumber(containers []moby.Container) int {
 	}
 	return max + 1
 
-}
-
-func getScale(config types.ServiceConfig) (int, error) {
-	scale := 1
-	if config.Deploy != nil && config.Deploy.Replicas != nil {
-		scale = int(*config.Deploy.Replicas)
-	}
-	if scale > 1 && config.ContainerName != "" {
-		return 0, fmt.Errorf(doubledContainerNameWarning,
-			config.Name,
-			config.ContainerName)
-	}
-	return scale, nil
 }
 
 func (s *composeService) createContainer(ctx context.Context, project *types.Project, service types.ServiceConfig,
@@ -511,7 +512,7 @@ func (s *composeService) recreateContainer(ctx context.Context, project *types.P
 		return created, err
 	}
 
-	err = s.apiClient().ContainerRemove(ctx, replaced.ID, moby.ContainerRemoveOptions{})
+	err = s.apiClient().ContainerRemove(ctx, replaced.ID, containerType.RemoveOptions{})
 	if err != nil {
 		return created, err
 	}
@@ -545,7 +546,7 @@ func setDependentLifecycle(project *types.Project, service string, strategy stri
 func (s *composeService) startContainer(ctx context.Context, container moby.Container) error {
 	w := progress.ContextWriter(ctx)
 	w.Event(progress.NewEvent(getContainerProgressName(container), progress.Working, "Restart"))
-	err := s.apiClient().ContainerStart(ctx, container.ID, moby.ContainerStartOptions{})
+	err := s.apiClient().ContainerStart(ctx, container.ID, containerType.StartOptions{})
 	if err != nil {
 		return err
 	}
@@ -623,6 +624,11 @@ func (s *composeService) createMobyContainer(ctx context.Context,
 	}
 
 	err = s.injectSecrets(ctx, project, service, created.ID)
+	if err != nil {
+		return created, err
+	}
+
+	err = s.injectConfigs(ctx, project, service, created.ID)
 	return created, err
 }
 
@@ -742,7 +748,7 @@ func (s *composeService) startService(ctx context.Context, project *types.Projec
 	}
 
 	if len(containers) == 0 {
-		if scale, err := getScale(service); err != nil && scale == 0 {
+		if service.GetScale() == 0 {
 			return nil
 		}
 		return fmt.Errorf("service %q has no container to start", service.Name)
@@ -755,7 +761,7 @@ func (s *composeService) startService(ctx context.Context, project *types.Projec
 		}
 		eventName := getContainerProgressName(container)
 		w.Event(progress.StartingEvent(eventName))
-		err := s.apiClient().ContainerStart(ctx, container.ID, moby.ContainerStartOptions{})
+		err := s.apiClient().ContainerStart(ctx, container.ID, containerType.StartOptions{})
 		if err != nil {
 			return err
 		}

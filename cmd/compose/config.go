@@ -24,8 +24,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/compose-spec/compose-go/cli"
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	"github.com/spf13/cobra"
 
@@ -210,7 +210,7 @@ func runHash(ctx context.Context, dockerCli command.Cli, opts configOptions) err
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(dockerCli.Out(), "%s %s\n", s.Name, hash)
+		fmt.Fprintf(dockerCli.Out(), "%s %s\n", name, hash)
 	}
 	return nil
 }

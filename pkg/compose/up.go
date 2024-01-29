@@ -23,7 +23,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli"
 	"github.com/docker/compose/v2/internal/tracing"
 	"github.com/docker/compose/v2/pkg/api"
@@ -31,7 +31,7 @@ import (
 	"github.com/hashicorp/go-multierror"
 )
 
-func (s *composeService) Up(ctx context.Context, project *types.Project, options api.UpOptions) error {
+func (s *composeService) Up(ctx context.Context, project *types.Project, options api.UpOptions) error { //nolint:gocyclo
 	err := progress.Run(ctx, tracing.SpanWrapFunc("project/up", tracing.ProjectOptions(project), func(ctx context.Context) error {
 		err := s.create(ctx, project, options.Create)
 		if err != nil {
@@ -64,27 +64,36 @@ func (s *composeService) Up(ctx context.Context, project *types.Project, options
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 	defer close(signalChan)
 	var isTerminated bool
+	printer := newLogPrinter(options.Start.Attach)
 
 	doneCh := make(chan bool)
 	eg.Go(func() error {
 		first := true
+		gracefulTeardown := func() {
+			printer.Cancel()
+			fmt.Fprintln(s.stdinfo(), "Gracefully stopping... (press Ctrl+C again to force)")
+			eg.Go(func() error {
+				err := s.Stop(context.Background(), project.Name, api.StopOptions{
+					Services: options.Create.Services,
+					Project:  project,
+				})
+				isTerminated = true
+				close(doneCh)
+				return err
+			})
+			first = false
+		}
 		for {
 			select {
 			case <-doneCh:
 				return nil
+			case <-ctx.Done():
+				if first {
+					gracefulTeardown()
+				}
 			case <-signalChan:
 				if first {
-					fmt.Fprintln(s.stdinfo(), "Gracefully stopping... (press Ctrl+C again to force)")
-					eg.Go(func() error {
-						err := s.Stop(context.Background(), project.Name, api.StopOptions{
-							Services: options.Create.Services,
-							Project:  project,
-						})
-						isTerminated = true
-						close(doneCh)
-						return err
-					})
-					first = false
+					gracefulTeardown()
 				} else {
 					eg.Go(func() error {
 						return s.Kill(context.Background(), project.Name, api.KillOptions{
@@ -97,8 +106,6 @@ func (s *composeService) Up(ctx context.Context, project *types.Project, options
 			}
 		}
 	})
-
-	printer := newLogPrinter(options.Start.Attach)
 
 	var exitCode int
 	eg.Go(func() error {

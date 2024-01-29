@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
-	xprogress "github.com/docker/buildx/util/progress"
+	xprogress "github.com/moby/buildkit/util/progress/progressui"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/cmd/formatter"
 	"github.com/spf13/cobra"
@@ -102,7 +102,7 @@ func upCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *c
 	flags.BoolVarP(&up.Detach, "detach", "d", false, "Detached mode: Run containers in the background")
 	flags.BoolVar(&create.Build, "build", false, "Build images before starting containers.")
 	flags.BoolVar(&create.noBuild, "no-build", false, "Don't build an image, even if it's policy.")
-	flags.StringVar(&create.Pull, "pull", "policy", `Pull image before running ("always"|"policy"|"never")`)
+	flags.StringVar(&create.Pull, "pull", "policy", `Pull image before running ("always"|"missing"|"never")`)
 	flags.BoolVar(&create.removeOrphans, "remove-orphans", false, "Remove containers for services not defined in the Compose file.")
 	flags.StringArrayVar(&create.scale, "scale", []string{}, "Scale SERVICE to NUM instances. Overrides the `scale` setting in the Compose file if present.")
 	flags.BoolVar(&up.noColor, "no-color", false, "Produce monochrome output.")
@@ -177,11 +177,9 @@ func runUp(
 	}
 
 	var build *api.BuildOptions
-	// this check is technically redundant as createOptions::apply()
-	// already removed all the build sections
 	if !createOptions.noBuild {
 		if createOptions.quietPull {
-			buildOptions.Progress = xprogress.PrinterModeQuiet
+			buildOptions.Progress = string(xprogress.QuietMode)
 		}
 		// BuildOptions here is nested inside CreateOptions, so
 		// no service list is passed, it will implicitly pick all
@@ -261,22 +259,12 @@ func runUp(
 	})
 }
 
-func setServiceScale(project *types.Project, name string, replicas uint64) error {
-	for i, s := range project.Services {
-		if s.Name != name {
-			continue
-		}
-
-		service, err := project.GetService(name)
-		if err != nil {
-			return err
-		}
-		if service.Deploy == nil {
-			service.Deploy = &types.DeployConfig{}
-		}
-		service.Deploy.Replicas = &replicas
-		project.Services[i] = service
-		return nil
+func setServiceScale(project *types.Project, name string, replicas int) error {
+	service, err := project.GetService(name)
+	if err != nil {
+		return err
 	}
-	return fmt.Errorf("unknown service %q", name)
+	service.SetScale(replicas)
+	project.Services[name] = service
+	return nil
 }
